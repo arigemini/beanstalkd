@@ -108,6 +108,7 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
 #define STATE_SENDWORD 3
 #define STATE_WAIT 4
 #define STATE_BITBUCKET 5
+#define STATE_CLOSE 6
 
 #define OP_UNKNOWN 0
 #define OP_PUT 1
@@ -289,7 +290,7 @@ reply(Conn *c, char *line, int len, int state)
 }
 
 
-void
+static void
 protrmdirty(Conn *c)
 {
     Conn *x, *newdirty = NULL;
@@ -695,7 +696,7 @@ check_err(Conn *c, const char *s)
     if (errno == EWOULDBLOCK) return;
 
     twarn("%s", s);
-    connclose(c);
+    c->state = STATE_CLOSE;
     return;
 }
 
@@ -1555,7 +1556,7 @@ dispatch_cmd(Conn *c)
         reply_line(c, STATE_SENDWORD, "WATCHING %zu\r\n", c->watch.used);
         break;
     case OP_QUIT:
-        connclose(c);
+        c->state = STATE_CLOSE;
         break;
     case OP_PAUSE_TUBE:
         op_ct[type]++;
@@ -1671,9 +1672,13 @@ conn_data(Conn *c)
     case STATE_WANTCOMMAND:
         r = read(c->sock.fd, c->cmd + c->cmd_read, LINE_BUF_SIZE - c->cmd_read);
         if (r == -1) return check_err(c, "read()");
-        if (r == 0) return connclose(c); /* the client hung up */
+        if (r == 0) {
+            c->state = STATE_CLOSE;
+            return;
+        }
 
         c->cmd_read += r; /* we got some bytes */
+        fprintf(stderr, "r %d\n", r);
 
         c->cmd_len = cmd_len(c); /* find the EOL */
 
@@ -1696,7 +1701,10 @@ conn_data(Conn *c)
         to_read = min(c->in_job_read, BUCKET_BUF_SIZE);
         r = read(c->sock.fd, bucket, to_read);
         if (r == -1) return check_err(c, "read()");
-        if (r == 0) return connclose(c); /* the client hung up */
+        if (r == 0) {
+            c->state = STATE_CLOSE;
+            return;
+        }
 
         c->in_job_read -= r; /* we got some bytes */
 
@@ -1711,7 +1719,10 @@ conn_data(Conn *c)
 
         r = read(c->sock.fd, j->body + c->in_job_read, j->r.body_size -c->in_job_read);
         if (r == -1) return check_err(c, "read()");
-        if (r == 0) return connclose(c); /* the client hung up */
+        if (r == 0) {
+            c->state = STATE_CLOSE;
+            return;
+        }
 
         c->in_job_read += r; /* we got some bytes */
 
@@ -1722,7 +1733,10 @@ conn_data(Conn *c)
     case STATE_SENDWORD:
         r= write(c->sock.fd, c->reply + c->reply_sent, c->reply_len - c->reply_sent);
         if (r == -1) return check_err(c, "write()");
-        if (r == 0) return connclose(c); /* the client hung up */
+        if (r == 0) {
+            c->state = STATE_CLOSE;
+            return;
+        }
 
         c->reply_sent += r; /* we got some bytes */
 
@@ -1742,7 +1756,10 @@ conn_data(Conn *c)
 
         r = writev(c->sock.fd, iov, 2);
         if (r == -1) return check_err(c, "writev()");
-        if (r == 0) return connclose(c); /* the client hung up */
+        if (r == 0) {
+            c->state = STATE_CLOSE;
+            return;
+        }
 
         /* update the sent values */
         c->reply_sent += r;
@@ -1810,6 +1827,10 @@ h_conn(const int fd, const short which, Conn *c)
 
     conn_data(c);
     while (cmd_data_ready(c) && (c->cmd_len = cmd_len(c))) do_cmd(c);
+    if (c->state == STATE_CLOSE) {
+        protrmdirty(c);
+        connclose(c);
+    }
     update_conns();
 }
 
